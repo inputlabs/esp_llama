@@ -1,33 +1,24 @@
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <time.h>
 #include <math.h>
 #include <string.h>
-#include <assert.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/semphr.h>
 #include <freertos/timers.h>
 #include <driver/uart.h>
 #include <driver/gpio.h>
 #include <nvs_flash.h>
 #include <esp_random.h>
-#include <esp_event.h>
 #include <esp_netif.h>
 #include <esp_wifi.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_now.h>
-#include <esp_crc.h>
 #include <esp_timer.h>
 
-#define ESPNOW_WIFI_MODE WIFI_MODE_STA
-#define ESPNOW_WIFI_IF ESP_IF_WIFI_STA
-#define ESPNOW_CHANNEL 1
-#define ESPNOW_ENABLE_LONG_RANGE false
-#define ESPNOW_ENABLE_POWER_SAVE false
-#define ESPNOW_WAKE_WINDOW 50
-#define ESPNOW_WAKE_INTERVAL 100
+#define ESPNOW_CHANNEL 9
 #define ESPNOW_PMK "pmk1234567890123"
 #define ESPNOW_LMK "lmk1234567890123"
 
@@ -64,7 +55,7 @@ static void wifi_init(void) {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(ESPNOW_WIFI_MODE));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
 }
@@ -112,13 +103,16 @@ static void dongle_task() {
 
 static void controller_task() {
     // uint8_t* data = (uint8_t*)malloc(16);
-    uint8_t data[16] = {1,2,3,4,};
+    uint8_t data[32] = {0,};
 
 
     while(true) {
+        int64_t now = esp_timer_get_time();
+        memcpy(data, (uint8_t*)&now, 8);
+
         uint8_t code = esp_now_send(MAC_DONGLE, data, 16);
-        ESP_LOGI("CONTROLLER_TASK", "esp_now_send() code=%i", code);
-        vTaskDelay(1000);
+        // ESP_LOGI("CONTROLLER_TASK", "esp_now_send() code=%i", code);
+        vTaskDelay(4);
 
         // size_t pending = 0;
         // uart_get_buffered_data_len(UART_NUM_1, &pending);
@@ -149,8 +143,35 @@ static void controller_task() {
     // free(data);
 }
 
-static void espnow_dongle_callback(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
-    ESP_LOGI("DONGLE_CB", "data %i %i %i %i ", data[0], data[1], data[2], data[3]);
+static void espnow_dongle_callback(
+    const esp_now_recv_info_t *recv_info,
+    const uint8_t *data,
+    int len
+) {
+    // ESP_LOGI("DONGLE_CB", "data %i %i %i %i ", data[0], data[1], data[2], data[3]);
+    esp_now_send(MAC_CONTROLLER, data, len);
+}
+
+static void espnow_controller_callback(
+    const esp_now_recv_info_t *recv_info,
+    const uint8_t *data,
+    int len
+) {
+    static uint16_t iter = 0;
+    static float sum = 0;
+    static int64_t last_print = 0;
+    int64_t ts;
+    memcpy(&ts, data, 8);
+    int64_t now = esp_timer_get_time();
+    int64_t roundtrip = (now - ts);
+    sum += roundtrip;
+    iter++;
+    if (now - last_print > 250*1000) {
+        ESP_LOGI("CONTROLLER_CB", "roundtrip_avg=%.0f packets=%i", sum/iter, iter);
+        last_print = now;
+        iter = 0;
+        sum = 0;
+    }
 }
 
 // static void espnow_callback_1(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
@@ -210,15 +231,15 @@ void add_peer(uint8_t* mac) {
     ESP_LOGI("ADD_PEER", "MAC %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, mac, 6);
-    peer.channel = 0;
-    peer.encrypt = false;
+    peer.channel = ESPNOW_CHANNEL;
+    peer.encrypt = true;
     esp_err_t ret = esp_now_add_peer(&peer);
     ESP_ERROR_CHECK(ret);
 }
 
 void app_main(void) {
-    memcpy(MAC_DONGLE, MAC_C2_BREAKOUT_A, 6);
-    memcpy(MAC_CONTROLLER, MAC_C2_DEVBOARD_A, 6);
+    memcpy(MAC_DONGLE, MAC_C2_DEVBOARD_A, 6);
+    memcpy(MAC_CONTROLLER, MAC_C2_BREAKOUT_A, 6);
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -248,7 +269,7 @@ void app_main(void) {
     if (compare_mac(mac, MAC_CONTROLLER)) {
         ESP_LOGI("MAIN", "INIT controller");
         add_peer(MAC_DONGLE);
-        // esp_now_register_recv_cb(espnow_callback_1);
+        esp_now_register_recv_cb(espnow_controller_callback);
         xTaskCreate(controller_task, "controller", TASK_STACK, NULL, 10, NULL);
     }
 }
