@@ -43,12 +43,6 @@ static uint8_t MAC_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // static uint8_t MAC_CONTROLLER[6];
 
 
-void loguart(char *msg) {
-    char data[32] = {0,};
-    memcpy(data, msg, strlen(msg));
-    uart_write_bytes(UART_NUM_1, (const char*)data, 32);
-}
-
 void print_array(uint8_t *array, uint8_t len, bool hex, bool newline) {
     printf("[");
     for(uint8_t i=0; i<len; i++) {
@@ -60,6 +54,7 @@ void print_array(uint8_t *array, uint8_t len, bool hex, bool newline) {
 }
 
 static void wifi_init(void) {
+    printf("INIT: wifi_init...\n");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -68,9 +63,12 @@ static void wifi_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    printf("INIT: wifi_init completed\n");
 }
 
 static void uart_init() {
+    printf("INIT: uart_init...\n");
+    // Reinitialization needed to enable RX.
     uart_config_t uart_config = {
         .baud_rate  = UART_RATE,
         .data_bits  = UART_DATA_8_BITS,
@@ -79,24 +77,9 @@ static void uart_init() {
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    // Move uart0 (stdio) to secondary pins.
-    ESP_ERROR_CHECK(uart_set_pin(
-        UART_NUM_0,
-        UART_SECONDARY_PIN_TX,
-        UART_SECONDARY_PIN_RX,
-        UART_PIN_NO_CHANGE,
-        UART_PIN_NO_CHANGE
-    ));
-    // Config uart1 (data) to primary pins.
-    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_1, UART_BUFFER_SIZE, UART_BUFFER_SIZE, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(UART_NUM_1, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(
-        UART_NUM_1,
-        UART_PRIMARY_PIN_TX,
-        UART_PRIMARY_PIN_RX,
-        UART_PIN_NO_CHANGE,
-        UART_PIN_NO_CHANGE
-    ));
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, UART_BUFFER_SIZE, UART_BUFFER_SIZE, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+    printf("INIT: uart_init completed\n");
 }
 
 static void unified_task() {
@@ -104,13 +87,14 @@ static void unified_task() {
     static uint8_t payload[32] = {0,};
     while(true) {
         uint16_t pending = 0;
-        uart_get_buffered_data_len(UART_NUM_1, (size_t*)&pending);
+        uint8_t err_read = uart_get_buffered_data_len(UART_NUM_0, (size_t*)&pending);
+        if (err_read) printf("UART: uart_get_buffered_data_len error=%i\n", err_read);
         if (pending == 0) {
             vTaskDelay(1);
             continue;
         }
         char buffer[1] = {0};
-        uart_read_bytes(UART_NUM_1, &buffer, 1, 0);
+        uart_read_bytes(UART_NUM_0, &buffer, 1, 0);
         char c = buffer[0];
         // Check control bytes.
         if (i < 4) {
@@ -127,8 +111,8 @@ static void unified_task() {
             // Payload complete.
             if (i == 32+4) {
                 // print_array(payload, 32);
-                uint8_t err = esp_now_send(MAC_BROADCAST, payload, 32);
-                // if (err) printf("send error=%i\n", err);
+                uint8_t err_send = esp_now_send(MAC_BROADCAST, payload, 32);
+                if (err_send) printf("WLAN: esp_now_send error=%i\n", err_send);
                 i = 0;
             }
         }
@@ -145,10 +129,10 @@ static void unified_callback(
     // memcpy(message, payload, 32);
     // memcpy(message, payload, 32);
     uint8_t sent;
-    sent = uart_write_bytes(UART_NUM_1, control, 4);
-    // if (sent != 4) printf("UART write error\n");
-    sent = uart_write_bytes(UART_NUM_1, data, len);
-    // if (sent != len) printf("UART write error\n");
+    sent = uart_write_bytes(UART_NUM_0, control, 4);
+    if (sent != 4) printf("UART: uart_write_bytes error\n");
+    sent = uart_write_bytes(UART_NUM_0, data, len);
+    if (sent != len) printf("UART: uart_write_bytes error\n");
 }
 
 // static void mock_task_1() {
@@ -156,9 +140,9 @@ static void unified_callback(
 //         char control[4] = {16, 32, 64, 128,};
 //         char payload[32] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31};
 //         uint8_t sent = 0;
-//         sent = uart_write_bytes(UART_NUM_1, control, 4);
+//         sent = uart_write_bytes(UART_NUM_0, control, 4);
 //         if (sent != 4) printf("UART write error\n");
-//         sent = uart_write_bytes(UART_NUM_1, payload, 32);
+//         sent = uart_write_bytes(UART_NUM_0, payload, 32);
 //         if (sent != 32) printf("UART write error\n");
 //         vTaskDelay(2000);
 //     }
@@ -183,9 +167,9 @@ static void unified_callback(
 //     // memcpy(message, payload, 32);
 //     // memcpy(message, payload, 32);
 //     uint8_t sent;
-//     sent = uart_write_bytes(UART_NUM_1, control, 4);
+//     sent = uart_write_bytes(UART_NUM_0, control, 4);
 //     if (sent != 4) printf("UART write error\n");
-//     sent = uart_write_bytes(UART_NUM_1, data, len);
+//     sent = uart_write_bytes(UART_NUM_0, data, len);
 //     if (sent != len) printf("UART write error\n");
 // }
 
@@ -227,10 +211,9 @@ void app_main(void) {
     uart_init();
     wifi_init();
     esp_now_init();
-
-    // Unified.
-    printf("INIT unified\n");
     add_peer(MAC_BROADCAST);
+
+    printf("INIT: tasks and callbacks\n");
     esp_now_register_recv_cb(unified_callback);
     xTaskCreate(unified_task, "task", TASK_STACK, NULL, 10, NULL);
 
