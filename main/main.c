@@ -35,6 +35,12 @@
 #define UART_RATE 115200 * 8
 #define UART_BUFFER_SIZE 1024
 
+typedef enum _UART_AT {
+    AT_HID = 1,
+    AT_WEBUSB,
+    AT_BATTERY,
+} UART_AT;
+
 static uint8_t MAC_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // static uint8_t MAC_C6_DEVBOARD_A[6] = {0xF0, 0xF5, 0xBD, 0x05, 0xDB, 0xA8};
 // static uint8_t MAC_C6_DEVBOARD_B[6] = {0xF0, 0xF5, 0xBD, 0x05, 0xCD, 0x2C};
@@ -55,7 +61,7 @@ void print_array(uint8_t *array, uint8_t len, bool hex, bool newline) {
 }
 
 static void wifi_init(void) {
-    printf("INIT: wifi_init...\n");
+    printf("ESP: wifi_init...\n");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -64,11 +70,12 @@ static void wifi_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    printf("INIT: wifi_init completed\n");
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(66));  // 66=16dB, 72=18dB, 80=20dB (max).
+    printf("ESP: wifi_init completed\n");
 }
 
 static void uart_init() {
-    printf("INIT: uart_init...\n");
+    printf("ESP: uart_init...\n");
     // Reinitialization needed to enable RX.
     uart_config_t uart_config = {
         .baud_rate  = UART_RATE,
@@ -80,16 +87,17 @@ static void uart_init() {
     };
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, UART_BUFFER_SIZE, UART_BUFFER_SIZE, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
-    printf("INIT: uart_init completed\n");
+    printf("ESP: uart_init completed\n");
 }
 
-static void unified_task() {
+static void uart_read_task() {
     static uint8_t i = 0;
-    static uint8_t payload[32] = {0,};
+    static uint8_t command = 0;
+    static uint8_t payload[68] = {0,};
     while(true) {
         uint16_t pending = 0;
         uint8_t err_read = uart_get_buffered_data_len(UART_NUM_0, (size_t*)&pending);
-        if (err_read) printf("UART: uart_get_buffered_data_len error=%i\n", err_read);
+        if (err_read) printf("ESP: uart_get_buffered_data_len error=%i\n", err_read);
         if (pending == 0) {
             vTaskDelay(1);
             continue;
@@ -98,42 +106,51 @@ static void unified_task() {
         uart_read_bytes(UART_NUM_0, &buffer, 1, 0);
         char c = buffer[0];
         // Check control bytes.
-        if (i < 4) {
-            if ((i==0 && c==16) || (i==1 && c==32) || (i==2 && c==64) || (i==3 && c==128))  {
+        if (i < 3) {
+            if ((i==0 && c==30) || (i==1 && c==29) || (i==2 && c==28))  {
                 i += 1;
             } else {
                 i = 0;
-                // printf("UART misaligned\n");
             }
-        } else {
-            // Get payload.
+        }
+        // Get AT command.
+        else if (i == 3) {
+            if (c >= AT_HID && c <= AT_BATTERY) {
+                command = c;
+                i += 1;
+            } else {
+                i = 0;
+                printf("ESP: AT command unknown (%i)\n", c);
+            }
+        }
+        // Get payload.
+        else {
             payload[i-4] = c;
             i += 1;
             // Payload complete.
-            if (i == 32+4) {
-                // print_array(payload, 32);
-                uint8_t err_send = esp_now_send(MAC_BROADCAST, payload, 32);
-                if (err_send) printf("WLAN: esp_now_send error=%i\n", err_send);
+            if (command==AT_HID && i==4+32) {
+                // ESP send HID.
+                uint8_t message[33] = {AT_HID, 0,};
+                memcpy(&message[1], payload, 32);
+                uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 33);
+                if (err_send) printf("ESP: esp_now_send error=%i\n", err_send);
                 i = 0;
+                continue;
             }
         }
     }
 }
 
-static void unified_callback(
+static void espnow_callback(
     const esp_now_recv_info_t *recv_info,
     const uint8_t *data,
     int len
 ) {
-    char control[4] = {16, 32, 64, 128};
-    // char message[32] = {0,};
-    // memcpy(message, payload, 32);
-    // memcpy(message, payload, 32);
-    uint8_t sent;
-    sent = uart_write_bytes(UART_NUM_0, control, 4);
-    if (sent != 4) printf("UART: uart_write_bytes error\n");
-    sent = uart_write_bytes(UART_NUM_0, data, len);
-    if (sent != len) printf("UART: uart_write_bytes error\n");
+    char message[68] = {30, 29, 28, 0,};
+    memcpy(&message[3], data, len);
+    uint8_t message_len = 3 + len;
+    uint8_t sent = uart_write_bytes(UART_NUM_0, message, message_len);
+    if (sent != message_len) printf("ESP: uart_write_bytes error\n");
 }
 
 // static void mock_task_1() {
@@ -189,6 +206,7 @@ void battery_level_task() {
     // Init switchable ground reference GPIO.
     gpio_set_direction(GPIO_NUM_18, GPIO_MODE_INPUT);
     // Start task.
+    static uint32_t battery_level = 0;
     while(true) {
         // Pull down GPIO 18.
         gpio_pulldown_en(GPIO_NUM_18);
@@ -196,11 +214,20 @@ void battery_level_task() {
         // Measure in GPIO 0.
         uint32_t value;
         adc_oneshot_read(adc_unit, ADC_CHANNEL_0, (int*)&value);
-        printf("Battery level: %lu\n", value);
+        if (battery_level == 0) {
+            battery_level = value;
+        } else {
+            battery_level = ((battery_level * 9) + value) / 10;
+        }
         // Float GPIO 18.
         gpio_pulldown_dis(GPIO_NUM_18);
         // Delay.
-        vTaskDelay(2000);
+        // printf("Battery level: %lu\n", battery_level);
+        uint8_t message[8] = {30, 29, 28, AT_BATTERY, 0, 0, 0, 0};
+        memcpy(&message[4], &battery_level, 4);
+        uint8_t sent = uart_write_bytes(UART_NUM_0, message, 8);
+        if (sent != 8) printf("ESP: uart_write_bytes error\n");
+        vTaskDelay(10000);
     }
 }
 
@@ -244,10 +271,10 @@ void app_main(void) {
     esp_now_init();
     add_peer(MAC_BROADCAST);
 
-    printf("INIT: tasks and callbacks\n");
-    esp_now_register_recv_cb(unified_callback);
-    xTaskCreate(unified_task, "task", TASK_STACK, NULL, 10, NULL);
-    // xTaskCreate(battery_level_task, "battery", TASK_STACK, NULL, 10, NULL);
+    printf("ESP: Init RTOS tasks\n");
+    esp_now_register_recv_cb(espnow_callback);
+    xTaskCreate(uart_read_task, "uart_read", TASK_STACK, NULL, 10, NULL);
+    xTaskCreate(battery_level_task, "battery_level", TASK_STACK, NULL, 11, NULL);
 
     // xTaskCreate(mock_task_1, "task", TASK_STACK, NULL, 10, NULL);
     // esp_now_register_recv_cb(mock_callback_1);
