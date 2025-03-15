@@ -137,6 +137,15 @@ static void uart_read_task() {
                 i = 0;
                 continue;
             }
+            if (command==AT_WEBUSB && i==4+64) {
+                // ESP send WEBSUB.
+                uint8_t message[65] = {AT_WEBUSB, 0,};
+                memcpy(&message[1], payload, 64);
+                uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 65);
+                if (err_send) printf("ESP: esp_now_send error=%i\n", err_send);
+                i = 0;
+                continue;
+            }
         }
     }
 }
