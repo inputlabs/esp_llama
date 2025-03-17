@@ -35,6 +35,18 @@
 #define UART_RATE 115200 * 8
 #define UART_BUFFER_SIZE 1024
 
+#define TX_20_DB 80
+#define TX_18_DB 72
+#define TX_16_DB 66
+#define TX_15_DB 60
+#define TX_14_DB 56
+#define TX_13_DB 52
+#define TX_11_DB 44
+#define TX_8_DB 34
+#define TX_7_DB 28
+#define TX_5_DB 20
+#define TX_2_DB 8
+
 typedef enum _UART_AT {
     AT_HID = 1,
     AT_WEBUSB,
@@ -60,8 +72,8 @@ void print_array(uint8_t *array, uint8_t len, bool hex, bool newline) {
     if (newline) printf("\n");
 }
 
-static void wifi_init(void) {
-    printf("ESP: wifi_init...\n");
+static void wlan_init(void) {
+    printf("ESP: wlan_init\n");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -70,12 +82,11 @@ static void wifi_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(66));  // 66=16dB, 72=18dB, 80=20dB (max).
-    printf("ESP: wifi_init completed\n");
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(TX_11_DB));
 }
 
 static void uart_init() {
-    printf("ESP: uart_init...\n");
+    printf("ESP: uart_init\n");
     // Reinitialization needed to enable RX.
     uart_config_t uart_config = {
         .baud_rate  = UART_RATE,
@@ -87,7 +98,6 @@ static void uart_init() {
     };
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, UART_BUFFER_SIZE, UART_BUFFER_SIZE, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
-    printf("ESP: uart_init completed\n");
 }
 
 static void uart_read_task() {
@@ -276,7 +286,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
 
     uart_init();
-    wifi_init();
+    wlan_init();
     esp_now_init();
     add_peer(MAC_BROADCAST);
 
