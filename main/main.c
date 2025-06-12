@@ -172,21 +172,23 @@ static void espnow_callback(
 }
 
 float battery_level_read() {
-    // Pull down GPIO 18.
+    // Pull down ground reference.
     gpio_pulldown_en(GPIO_NUM_18);
     // Give time to settle.
     vTaskDelay(1);
     // Measure in GPIO 0.
     uint32_t value;
     adc_oneshot_read(adc_unit, ADC_CHANNEL_0, (int*)&value);
-    // Float GPIO 18.
+    // Float ground reference (do not drain energy).
     gpio_pulldown_dis(GPIO_NUM_18);
+    // Return.
     return (float)value;
 }
 
 void battery_level_update() {
     float value = battery_level_read();
     if (battery_level == 0) {
+        // Very first read.
         battery_level = value;
     } else {
         // Rolling average.
@@ -196,9 +198,12 @@ void battery_level_update() {
 }
 
 void battery_level_send_uart() {
-    uint32_t level = (uint32_t)battery_level;  // Float to int.
+    // Prepare message body.
     uint8_t message[8] = {30, 29, 28, AT_BATTERY, 0, 0, 0, 0};
+    // Copy payload.
+    uint32_t level = (uint32_t)battery_level;  // Float to int.
     memcpy(&message[4], &level, 4);
+    // Send UART.
     uint8_t sent = uart_write_bytes(UART_NUM_0, message, 8);
     if (sent != 8) printf("ESP: uart_write_bytes error\n");
 }
