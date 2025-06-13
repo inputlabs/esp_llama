@@ -34,6 +34,10 @@
 #define UART_SECONDARY_PIN_RX 6
 #define UART_RATE 115200 * 8
 #define UART_BUFFER_SIZE 1024
+#define UART_CONTROL_0 30
+#define UART_CONTROL_1 29
+#define UART_CONTROL_2 28
+#define UART_BATTERY_MSG_LEN 8
 
 #define TX_20_DB 80
 #define TX_18_DB 72
@@ -116,7 +120,11 @@ static void uart_read_task() {
         char c = buffer[0];
         // Check control bytes.
         if (i < 3) {
-            if ((i==0 && c==30) || (i==1 && c==29) || (i==2 && c==28))  {
+            if (
+                (i==0 && c==UART_CONTROL_0) ||
+                (i==1 && c==UART_CONTROL_1) ||
+                (i==2 && c==UART_CONTROL_2)
+            ) {
                 i += 1;
             } else {
                 i = 0;
@@ -164,7 +172,7 @@ static void espnow_callback(
     const uint8_t *data,
     int len
 ) {
-    char message[68] = {30, 29, 28, 0,};
+    char message[68] = {UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, 0,};
     memcpy(&message[3], data, len);
     uint8_t message_len = 3 + len;
     uint8_t sent = uart_write_bytes(UART_NUM_0, message, message_len);
@@ -179,7 +187,7 @@ float battery_level_read() {
     // Measure in GPIO 0.
     uint32_t value;
     adc_oneshot_read(adc_unit, ADC_CHANNEL_0, (int*)&value);
-    // Float ground reference (do not drain energy).
+    // Stop pulling ground reference (do not drain energy).
     gpio_pulldown_dis(GPIO_NUM_18);
     // Return.
     return (float)value;
@@ -191,7 +199,7 @@ void battery_level_update() {
         // Very first read.
         battery_level = value;
     } else {
-        // Rolling average.
+        // Rolling average with previous samples.
         battery_level = (battery_level * (BATTERY_AVERAGE_SAMPLES-1)) + value;
         battery_level /= BATTERY_AVERAGE_SAMPLES;
     }
@@ -199,13 +207,15 @@ void battery_level_update() {
 
 void battery_level_send_uart() {
     // Prepare message body.
-    uint8_t message[8] = {30, 29, 28, AT_BATTERY, 0, 0, 0, 0};
+    uint8_t message[UART_BATTERY_MSG_LEN] = {
+        UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, AT_BATTERY, 0, 0, 0, 0
+    };
     // Copy payload.
     uint32_t level = (uint32_t)battery_level;  // Float to int.
-    memcpy(&message[4], &level, 4);
+    memcpy(&message[4], &level, 4);  // 32-bit int size (4x8).
     // Send UART.
-    uint8_t sent = uart_write_bytes(UART_NUM_0, message, 8);
-    if (sent != 8) printf("ESP: uart_write_bytes error\n");
+    uint8_t sent = uart_write_bytes(UART_NUM_0, message, UART_BATTERY_MSG_LEN);
+    if (sent != UART_BATTERY_MSG_LEN) printf("ESP: uart_write_bytes error\n");
 }
 
 void battery_adc_init() {
