@@ -34,6 +34,10 @@
 #define UART_SECONDARY_PIN_RX 6
 #define UART_RATE 115200 * 8
 #define UART_BUFFER_SIZE 1024
+#define UART_CONTROL_0 30
+#define UART_CONTROL_1 29
+#define UART_CONTROL_2 28
+#define UART_BATTERY_MSG_LEN 8
 
 #define TX_20_DB 80
 #define TX_18_DB 72
@@ -47,13 +51,19 @@
 #define TX_5_DB 20
 #define TX_2_DB 8
 
+#define BATTERY_INIT_SAMPLES 10
+#define BATTERY_AVERAGE_SAMPLES 10
+
 typedef enum _UART_AT {
     AT_HID = 1,
     AT_WEBUSB,
     AT_BATTERY,
 } UART_AT;
 
+// Static.
 static uint8_t MAC_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static adc_oneshot_unit_handle_t adc_unit;
+static float battery_level = 0;
 
 void print_array(uint8_t *array, uint8_t len, bool hex, bool newline) {
     printf("[");
@@ -110,7 +120,11 @@ static void uart_read_task() {
         char c = buffer[0];
         // Check control bytes.
         if (i < 3) {
-            if ((i==0 && c==30) || (i==1 && c==29) || (i==2 && c==28))  {
+            if (
+                (i==0 && c==UART_CONTROL_0) ||
+                (i==1 && c==UART_CONTROL_1) ||
+                (i==2 && c==UART_CONTROL_2)
+            ) {
                 i += 1;
             } else {
                 i = 0;
@@ -158,15 +172,53 @@ static void espnow_callback(
     const uint8_t *data,
     int len
 ) {
-    char message[68] = {30, 29, 28, 0,};
+    char message[68] = {UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, 0,};
     memcpy(&message[3], data, len);
     uint8_t message_len = 3 + len;
     uint8_t sent = uart_write_bytes(UART_NUM_0, message, message_len);
     if (sent != message_len) printf("ESP: uart_write_bytes error\n");
 }
 
-void battery_level_task() {
-    // Init ADC.
+float battery_level_read() {
+    // Pull down ground reference.
+    gpio_pulldown_en(GPIO_NUM_18);
+    // Give time to settle.
+    vTaskDelay(1);
+    // Measure in GPIO 0.
+    uint32_t value;
+    adc_oneshot_read(adc_unit, ADC_CHANNEL_0, (int*)&value);
+    // Stop pulling ground reference (do not drain energy).
+    gpio_pulldown_dis(GPIO_NUM_18);
+    // Return.
+    return (float)value;
+}
+
+void battery_level_update() {
+    float value = battery_level_read();
+    if (battery_level == 0) {
+        // Very first read.
+        battery_level = value;
+    } else {
+        // Rolling average with previous samples.
+        battery_level = (battery_level * (BATTERY_AVERAGE_SAMPLES-1)) + value;
+        battery_level /= BATTERY_AVERAGE_SAMPLES;
+    }
+}
+
+void battery_level_send_uart() {
+    // Prepare message body.
+    uint8_t message[UART_BATTERY_MSG_LEN] = {
+        UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, AT_BATTERY, 0, 0, 0, 0
+    };
+    // Copy payload.
+    uint32_t level = (uint32_t)battery_level;  // Float to int.
+    memcpy(&message[4], &level, 4);  // 32-bit int size (4x8).
+    // Send UART.
+    uint8_t sent = uart_write_bytes(UART_NUM_0, message, UART_BATTERY_MSG_LEN);
+    if (sent != UART_BATTERY_MSG_LEN) printf("ESP: uart_write_bytes error\n");
+}
+
+void battery_adc_init() {
     adc_oneshot_unit_init_cfg_t unit_config = {
         .unit_id = ADC_UNIT_1,
     };
@@ -174,33 +226,20 @@ void battery_level_task() {
         .bitwidth = ADC_BITWIDTH_DEFAULT,
         .atten = ADC_ATTEN_DB_12,
     };
-    adc_oneshot_unit_handle_t adc_unit;
     adc_oneshot_new_unit(&unit_config, &adc_unit);
     adc_oneshot_config_channel(adc_unit, ADC_CHANNEL_0, &channel_config);
     // Init switchable ground reference GPIO.
     gpio_set_direction(GPIO_NUM_18, GPIO_MODE_INPUT);
-    // Start task.
-    static uint32_t battery_level = 0;
+    // First measurements (to get stable values ASAP).
+    for(uint8_t i=0; i<BATTERY_INIT_SAMPLES; i++) {
+        battery_level_update();
+    }
+}
+
+void battery_level_task() {
     while(true) {
-        // Pull down GPIO 18.
-        gpio_pulldown_en(GPIO_NUM_18);
-        vTaskDelay(1);  // Give time to settle.
-        // Measure in GPIO 0.
-        uint32_t value;
-        adc_oneshot_read(adc_unit, ADC_CHANNEL_0, (int*)&value);
-        if (battery_level == 0) {
-            battery_level = value;
-        } else {
-            battery_level = ((battery_level * 9) + value) / 10;
-        }
-        // Float GPIO 18.
-        gpio_pulldown_dis(GPIO_NUM_18);
-        // Send though UART.
-        uint8_t message[8] = {30, 29, 28, AT_BATTERY, 0, 0, 0, 0};
-        memcpy(&message[4], &battery_level, 4);
-        uint8_t sent = uart_write_bytes(UART_NUM_0, message, 8);
-        if (sent != 8) printf("ESP: uart_write_bytes error\n");
-        // Delay.
+        battery_level_update();
+        battery_level_send_uart();
         vTaskDelay(10000);
     }
 }
@@ -241,6 +280,8 @@ void app_main(void) {
     wlan_init();
     esp_now_init();
     add_peer(MAC_BROADCAST);
+    // Init ADC.
+    battery_adc_init();
     // Init tasks.
     printf("ESP: Init RTOS tasks\n");
     esp_now_register_recv_cb(espnow_callback);
