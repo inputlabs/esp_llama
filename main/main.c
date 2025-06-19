@@ -37,7 +37,14 @@
 #define UART_CONTROL_0 30
 #define UART_CONTROL_1 29
 #define UART_CONTROL_2 28
-#define UART_BATTERY_MSG_LEN 8
+#define UART_CONTROL_BYTES  UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2
+#define UART_HEADER_LEN 4
+#define UART_PAYLOAD_MAX_LEN 68
+
+#define AT_HID_LEN 32
+#define AT_WEBUSB_LEN 64
+#define AT_BATTERY_LEN 4
+#define AT_USB_PROTOCOL_LEN 1
 
 #define TX_20_DB 80
 #define TX_18_DB 72
@@ -58,6 +65,7 @@ typedef enum _UART_AT {
     AT_HID = 1,
     AT_WEBUSB,
     AT_BATTERY,
+    AT_USB_PROTOCOL,
 } UART_AT;
 
 // Static.
@@ -88,6 +96,40 @@ static void wlan_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(TX_11_DB));
 }
 
+static void espnow_send_hid(uint8_t *payload) {
+    uint8_t message[1+AT_HID_LEN] = {AT_HID, 0,};
+    memcpy(&message[1], payload, AT_HID_LEN);
+    uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 1+AT_HID_LEN);
+    if (err_send) printf("ESP: espnow_send_hid error=%i\n", err_send);
+}
+
+static void espnow_send_webusb(uint8_t *payload) {
+    uint8_t message[1+AT_WEBUSB_LEN] = {AT_WEBUSB, 0,};
+    memcpy(&message[1], payload, AT_WEBUSB_LEN);
+    uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 1+AT_WEBUSB_LEN);
+    if (err_send) printf("ESP: espnow_send_webusb error=%i\n", err_send);
+}
+
+static void espnow_send_usb_protocol(uint8_t *payload) {
+    uint8_t message[1+AT_USB_PROTOCOL_LEN] = {AT_USB_PROTOCOL, 0,};
+    memcpy(&message[1], payload, AT_USB_PROTOCOL_LEN);
+    uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 1+AT_USB_PROTOCOL_LEN);
+    if (err_send) printf("ESP: espnow_send_usb_protocol error=%i\n", err_send);
+}
+
+// Redirect incomming ESPNOW messages to UART.
+static void espnow_callback(
+    const esp_now_recv_info_t *recv_info,
+    const uint8_t *data,
+    int len
+) {
+    char message[UART_PAYLOAD_MAX_LEN] = {UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, 0,};
+    memcpy(&message[3], data, len);
+    uint8_t message_len = 3 + len;
+    uint8_t sent = uart_write_bytes(UART_NUM_0, message, message_len);
+    if (sent != message_len) printf("ESP: uart_write_bytes error\n");
+}
+
 static void uart_init() {
     printf("ESP: uart_init\n");
     // Reinitialization needed to enable RX.
@@ -103,10 +145,11 @@ static void uart_init() {
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
 }
 
+// Redirect incomming UART messages to ESPNOW.
 static void uart_read_task() {
     static uint8_t i = 0;
     static uint8_t command = 0;
-    static uint8_t payload[68] = {0,};
+    static uint8_t payload[UART_PAYLOAD_MAX_LEN] = {0,};
     while(true) {
         uint16_t pending = 0;
         uint8_t err_read = uart_get_buffered_data_len(UART_NUM_0, (size_t*)&pending);
@@ -132,7 +175,7 @@ static void uart_read_task() {
         }
         // Get AT command.
         else if (i == 3) {
-            if (c >= AT_HID && c <= AT_BATTERY) {
+            if (c >= AT_HID && c <= AT_USB_PROTOCOL) {
                 command = c;
                 i += 1;
             } else {
@@ -142,41 +185,26 @@ static void uart_read_task() {
         }
         // Get payload.
         else {
-            payload[i-4] = c;
+            payload[i-UART_HEADER_LEN] = c;
             i += 1;
             // Payload complete.
-            if (command==AT_HID && i==4+32) {
-                // ESP send HID.
-                uint8_t message[33] = {AT_HID, 0,};
-                memcpy(&message[1], payload, 32);
-                uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 33);
-                if (err_send) printf("ESP: esp_now_send error=%i\n", err_send);
+            if (command==AT_HID && i==UART_HEADER_LEN+AT_HID_LEN) {
+                espnow_send_hid(payload);
                 i = 0;
                 continue;
             }
-            if (command==AT_WEBUSB && i==4+64) {
-                // ESP send WEBSUB.
-                uint8_t message[65] = {AT_WEBUSB, 0,};
-                memcpy(&message[1], payload, 64);
-                uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 65);
-                if (err_send) printf("ESP: esp_now_send error=%i\n", err_send);
+            if (command==AT_WEBUSB && i==UART_HEADER_LEN+AT_WEBUSB_LEN) {
+                espnow_send_webusb(payload);
+                i = 0;
+                continue;
+            }
+            if (command==AT_USB_PROTOCOL && i==UART_HEADER_LEN+AT_USB_PROTOCOL_LEN) {
+                espnow_send_usb_protocol(payload);
                 i = 0;
                 continue;
             }
         }
     }
-}
-
-static void espnow_callback(
-    const esp_now_recv_info_t *recv_info,
-    const uint8_t *data,
-    int len
-) {
-    char message[68] = {UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, 0,};
-    memcpy(&message[3], data, len);
-    uint8_t message_len = 3 + len;
-    uint8_t sent = uart_write_bytes(UART_NUM_0, message, message_len);
-    if (sent != message_len) printf("ESP: uart_write_bytes error\n");
 }
 
 float battery_level_read() {
@@ -207,15 +235,13 @@ void battery_level_update() {
 
 void battery_level_send_uart() {
     // Prepare message body.
-    uint8_t message[UART_BATTERY_MSG_LEN] = {
-        UART_CONTROL_0, UART_CONTROL_1, UART_CONTROL_2, AT_BATTERY, 0, 0, 0, 0
-    };
+    uint8_t message[UART_HEADER_LEN+AT_BATTERY_LEN] = {UART_CONTROL_BYTES, AT_BATTERY, 0,};
     // Copy payload.
     uint32_t level = (uint32_t)battery_level;  // Float to int.
     memcpy(&message[4], &level, 4);  // 32-bit int size (4x8).
     // Send UART.
-    uint8_t sent = uart_write_bytes(UART_NUM_0, message, UART_BATTERY_MSG_LEN);
-    if (sent != UART_BATTERY_MSG_LEN) printf("ESP: uart_write_bytes error\n");
+    uint8_t sent = uart_write_bytes(UART_NUM_0, message, UART_HEADER_LEN+AT_BATTERY_LEN);
+    if (sent != UART_HEADER_LEN+AT_BATTERY_LEN) printf("ESP: battery_level_send_uart error\n");
 }
 
 void battery_adc_init() {
