@@ -13,12 +13,12 @@ cd esp-idf
 ## Build
 ```
 cd esp_llama
-idf.py set-target esp32-c2
 idf.py build
 make binpack
 ```
 
 ## Additional commands
+- `idf.py set-target esp32-c2` -- Initial config for c2 chip.
 - `idf.py menuconfig` -- Edit configuration via menu.
 - `idf.py flash` -- Upload the compiled binary into a connected ESP.
 - `idf.py monitor` -- Get logs from a connected ESP running the program.
