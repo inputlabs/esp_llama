@@ -45,6 +45,7 @@
 #define AT_WEBUSB_LEN 64
 #define AT_BATTERY_LEN 4
 #define AT_USB_PROTOCOL_LEN 1
+#define AT_HEARTBEAT_LEN 1
 
 // #define TX_20_DB 80
 // #define TX_18_DB 72
@@ -65,6 +66,7 @@ typedef enum _UART_AT {
     AT_HID = 1,
     AT_WEBUSB,
     AT_BATTERY,
+    AT_HEARTBEAT,
     AT_USB_PROTOCOL,
 } UART_AT;
 
@@ -109,6 +111,13 @@ static void espnow_send_webusb(uint8_t *payload) {
     memcpy(&message[1], payload, AT_WEBUSB_LEN);
     uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 1+AT_WEBUSB_LEN);
     if (err_send && debug) printf("ESP: espnow_send_webusb error=%i\n", err_send);
+}
+
+static void espnow_send_heartbeat(uint8_t *payload) {
+    uint8_t message[1+AT_HEARTBEAT_LEN] = {AT_HEARTBEAT, 0,};
+    memcpy(&message[1], payload, AT_HEARTBEAT_LEN);
+    uint8_t err_send = esp_now_send(MAC_BROADCAST, message, 1+AT_HEARTBEAT_LEN);
+    if (err_send) printf("ESP: espnow_send_heartbeat error=%i\n", err_send);
 }
 
 static void espnow_send_usb_protocol(uint8_t *payload) {
@@ -196,6 +205,11 @@ static void uart_read_task(void *pvParameters) {
             }
             if (command==AT_WEBUSB && i==UART_HEADER_LEN+AT_WEBUSB_LEN) {
                 espnow_send_webusb(payload);
+                i = 0;
+                continue;
+            }
+            if (command==AT_HEARTBEAT && i==UART_HEADER_LEN+AT_HEARTBEAT_LEN) {
+                espnow_send_heartbeat(payload);
                 i = 0;
                 continue;
             }
